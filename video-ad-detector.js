@@ -158,7 +158,7 @@ class VideoAdDetector {
                 }
                 
                 // 删除临时帧文件
-                await fs.remove(framePath);
+                // await fs.remove(framePath);
                 
             } catch (error) {
                 console.error(`❌ 处理第 ${i + 1} 帧时出错:`, error.message);
@@ -212,7 +212,7 @@ class VideoAdDetector {
                     const exactResult = await this.findExactAdStartFrame(sec - 1);
                     
                     // 删除临时帧文件
-                    await fs.remove(framePath);
+                    // await fs.remove(framePath);
                     
                     if (exactResult && exactResult.found) {
                         console.log(`\n🎉 成功找到广告的确切开始帧！`);
@@ -253,7 +253,7 @@ class VideoAdDetector {
                 }
                 
                 // 删除临时帧文件
-                await fs.remove(framePath);
+                // await fs.remove(framePath);
                 
             } catch (error) {
                 console.warn(`    ⚠️  检测第 ${sec} 秒时出错:`, error.message);
@@ -430,63 +430,51 @@ class VideoAdDetector {
         const lastAdFrame = this.adFrames[this.adFrames.length - 1];
         console.log(`  📋 使用广告结束参考帧: ${lastAdFrame.name}`);
         
-        // 广告长度是20秒，在广告开始时间+20秒的前后1秒范围内查找
+        // 广告长度是20秒，从预期结束时间的后一秒开始检测
         const expectedEndTime = adStartTime + 20;
-        const searchStart = expectedEndTime - 1;
-        const searchEnd = expectedEndTime + 1;
+        const searchTime = expectedEndTime + 1; // 从预期结束时间的后一秒开始
         
         console.log(`  📍 预期广告结束时间: ${expectedEndTime.toFixed(3)} 秒`);
-        console.log(`  📍 搜索范围: ${searchStart.toFixed(3)}s - ${searchEnd.toFixed(3)}s`);
+        console.log(`  📍 从 ${searchTime.toFixed(3)} 秒开始，在这一秒内从后往前逐帧检查`);
         
-        // 在搜索范围内每0.5秒检测一次
-        let currentTime = searchStart;
+        // 直接进行精确的逐帧检测
+        const exactResult = await this.findExactAdEndFrame(searchTime);
         
-        while (currentTime <= searchEnd) {
-            try {
-                console.log(`  🔍 检测时间点: ${currentTime.toFixed(3)} 秒`);
-                
-                // 提取当前时间的帧
-                const framePath = await this.extractFrameAtTime(currentTime);
-                const extractedFrame = await Jimp.read(framePath);
-                
-                // 与广告结束帧对比，要求100%匹配
-                const similarity = await this.compareImages(extractedFrame, lastAdFrame.image);
-                
-                console.log(`    相似度: ${(similarity * 100).toFixed(2)}%`);
-                
-                // 如果相似度达到100%（或非常接近），说明找到了广告结束的大致时间
-                if (similarity >= 0.99) { // 99%以上就认为是匹配
-                    console.log(`  🎯 找到广告结束的大致时间: ${currentTime.toFixed(3)} 秒`);
-                    
-                    // 删除临时帧文件
-                    await fs.remove(framePath);
-                    
-                    // 进行精确的逐帧检测
-                    const exactResult = await this.findExactAdEndFrame(currentTime);
-                    
-                    if (exactResult && exactResult.found) {
-                        return exactResult;
-                    }
-                } else {
-                    // 删除临时帧文件
-                    await fs.remove(framePath);
-                    
-                    // 继续向后搜索，每次跳跃0.5秒
-                    currentTime += 0.5;
-                }
-                
-            } catch (error) {
-                console.warn(`  ⚠️  检测时间 ${currentTime.toFixed(3)} 秒时出错:`, error.message);
-                currentTime += 0.5;
-            }
+        if (exactResult && exactResult.found) {
+            return exactResult;
         }
         
-        console.log(`  ❌ 在预期范围内未找到100%匹配的广告结束帧`);
+        console.log(`  ⚠️  在 ${searchTime.toFixed(3)} 秒内未找到匹配的广告结束帧`);
+        
+        // 如果在 searchTime 这一秒没有找到，再尝试在 searchTime - 1 这一秒内搜索
+        const fallbackSearchTime = searchTime - 1;
+        console.log(`  🔄 尝试在 ${fallbackSearchTime.toFixed(3)} 秒内搜索广告结束帧...`);
+        
+        const fallbackResult = await this.findExactAdEndFrame(fallbackSearchTime);
+        
+        if (fallbackResult && fallbackResult.found) {
+            return fallbackResult;
+        }
+        
+        console.log(`  ❌ 在 ${fallbackSearchTime.toFixed(3)} 秒内也未找到匹配的广告结束帧`);
+        
+        // 第二次回退策略：再尝试在 fallbackSearchTime - 1 秒内搜索
+        const secondFallbackTime = fallbackSearchTime - 1;
+        console.log(`  🔄 尝试第二次回退策略，在 ${secondFallbackTime.toFixed(3)} 秒内搜索...`);
+        
+        const secondFallbackResult = await this.findExactAdEndFrame(secondFallbackTime);
+        
+        if (secondFallbackResult && secondFallbackResult.found) {
+            console.log(`  ✅ 第二次回退策略成功找到广告结束帧！`);
+            return secondFallbackResult;
+        }
+        
+        console.log(`  ❌ 第二次回退策略也未找到匹配的广告结束帧`);
         return null;
     }
 
     async findExactAdEndFrame(timeInSeconds) {
-        console.log(`  🔍 在第 ${timeInSeconds} 秒内寻找广告的确切结束帧...`);
+        console.log(`  🔍 在第 ${timeInSeconds} 秒内从后往前寻找广告的确切结束帧...`);
         
         // 获取广告的最后一帧作为参考
         if (this.adFrames.length === 0) {
@@ -501,22 +489,16 @@ class VideoAdDetector {
             // 提取该秒内的所有帧
             const frames = await this.extractAllFramesInSecond(timeInSeconds);
             
-            let bestMatch = null;
-            let bestSimilarity = 0;
+            console.log(`  🔍 开始从后往前逐帧比较，寻找第一个匹配的帧...`);
             
-            console.log(`  🔍 开始逐帧比较，寻找100%匹配...`);
-            
-            for (const frame of frames) {
+            // 从后往前遍历帧
+            for (let i = frames.length - 1; i >= 0; i--) {
+                const frame = frames[i];
                 const similarity = await this.compareImages(frame.image, lastAdFrame.image);
                 
                 console.log(`    帧 ${frame.frameNumber} (时间: ${frame.frameTime.toFixed(3)}s): 相似度 ${(similarity * 100).toFixed(2)}%`);
                 
-                if (similarity > bestSimilarity) {
-                    bestSimilarity = similarity;
-                    bestMatch = frame;
-                }
-                
-                // 要求100%匹配（或99%以上）
+                // 要求99%以上匹配
                 if (similarity >= 0.99) {
                     console.log(`  🎯 找到广告结束帧!`);
                     console.log(`  📍 帧号: ${frame.frameNumber}`);
@@ -534,12 +516,26 @@ class VideoAdDetector {
                 }
             }
             
-            // 如果没有找到100%匹配的帧，返回最佳匹配
-            console.log(`  ⚠️  未找到100%匹配的结束帧，最佳匹配:`);
+            // 如果没有找到99%以上匹配的帧，找最佳匹配（从后往前）
+            console.log(`  ⚠️  未找到99%以上匹配的结束帧，寻找最佳匹配...`);
+            
+            let bestMatch = null;
+            let bestSimilarity = 0;
+            
+            for (let i = frames.length - 1; i >= 0; i--) {
+                const frame = frames[i];
+                const similarity = await this.compareImages(frame.image, lastAdFrame.image);
+                
+                if (similarity > bestSimilarity) {
+                    bestSimilarity = similarity;
+                    bestMatch = frame;
+                }
+            }
+            
             if (bestMatch) {
-                console.log(`  📍 帧号: ${bestMatch.frameNumber}`);
-                console.log(`  ⏰ 精确时间: ${bestMatch.frameTime.toFixed(3)} 秒`);
-                console.log(`  📊 相似度: ${(bestSimilarity * 100).toFixed(2)}%`);
+                console.log(`  📍 最佳匹配帧号: ${bestMatch.frameNumber}`);
+                console.log(`  ⏰ 最佳匹配时间: ${bestMatch.frameTime.toFixed(3)} 秒`);
+                console.log(`  📊 最佳匹配相似度: ${(bestSimilarity * 100).toFixed(2)}%`);
                 
                 // 如果最佳匹配的相似度也很高（95%以上），就接受它
                 if (bestSimilarity >= 0.95) {
@@ -598,7 +594,7 @@ class VideoAdDetector {
         try {
             await this.init();
             const results = await this.processVideo();
-            await this.cleanup();
+            // await this.cleanup();
             
             const endTime = Date.now();
             const totalTime = (endTime - startTime) / 1000;
