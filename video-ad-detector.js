@@ -594,6 +594,13 @@ class VideoAdDetector {
     async removeAdSegment(adStartTime, adEndTime) {
         console.log(`  🎬 删除广告片段: ${adStartTime.toFixed(3)}s - ${adEndTime.toFixed(3)}s`);
         
+        // 添加缓冲区以确保完全删除广告
+        const bufferTime = 0; // 前后各增加0.5秒缓冲
+        const adjustedStartTime = Math.max(0, adStartTime - bufferTime);
+        const adjustedEndTime = adEndTime + bufferTime;
+        
+        console.log(`  📏 调整后的删除范围: ${adjustedStartTime.toFixed(3)}s - ${adjustedEndTime.toFixed(3)}s (增加了${bufferTime}秒缓冲)`);
+        
         const outputPath = './01_no_ads.mp4';
         const tempPart1 = './temp_part1.mp4';
         const tempPart2 = './temp_part2.mp4';
@@ -603,17 +610,20 @@ class VideoAdDetector {
             const totalDuration = await this.getVideoDuration();
             console.log(`  📹 原视频总时长: ${totalDuration.toFixed(3)} 秒`);
             
-            // 第一部分：从开始到广告开始
-            if (adStartTime > 0) {
-                console.log(`  ⏳ 提取第一部分: 0s - ${adStartTime.toFixed(3)}s`);
-                await this.extractVideoSegment(0, adStartTime, tempPart1);
+            // 确保调整后的结束时间不超过视频总时长
+            const finalEndTime = Math.min(adjustedEndTime, totalDuration);
+            
+            // 第一部分：从开始到广告开始（调整后）
+            if (adjustedStartTime > 0) {
+                console.log(`  ⏳ 提取第一部分: 0s - ${adjustedStartTime.toFixed(3)}s`);
+                await this.extractVideoSegment(0, adjustedStartTime, tempPart1);
                 console.log(`  ✅ 第一部分提取完成`);
             }
             
-            // 第二部分：从广告结束到视频结束
-            if (adEndTime < totalDuration) {
-                console.log(`  ⏳ 提取第二部分: ${adEndTime.toFixed(3)}s - ${totalDuration.toFixed(3)}s`);
-                await this.extractVideoSegment(adEndTime, totalDuration - adEndTime, tempPart2);
+            // 第二部分：从广告结束（调整后）到视频结束
+            if (finalEndTime < totalDuration) {
+                console.log(`  ⏳ 提取第二部分: ${finalEndTime.toFixed(3)}s - ${totalDuration.toFixed(3)}s`);
+                await this.extractVideoSegment(finalEndTime, totalDuration - finalEndTime, tempPart2);
                 console.log(`  ✅ 第二部分提取完成`);
             }
             
@@ -623,12 +633,14 @@ class VideoAdDetector {
             console.log(`  ✅ 视频合并完成`);
             
             // 清理临时文件
-            console.log(`  🧹 清理临时文件...`);
-            await this.cleanupTempVideos([tempPart1, tempPart2]);
+            // console.log(`  🧹 清理临时文件...`);
+            // await this.cleanupTempVideos([tempPart1, tempPart2]);
             
-            const finalDuration = totalDuration - (adEndTime - adStartTime);
+            const finalDuration = totalDuration - (finalEndTime - adjustedStartTime);
             console.log(`  📊 删除广告后视频时长: ${finalDuration.toFixed(3)} 秒`);
-            console.log(`  💾 节省时间: ${(adEndTime - adStartTime).toFixed(3)} 秒`);
+            console.log(`  💾 实际删除时间: ${(finalEndTime - adjustedStartTime).toFixed(3)} 秒`);
+            console.log(`  🎯 原始广告时长: ${(adEndTime - adStartTime).toFixed(3)} 秒`);
+            console.log(`  🛡️  缓冲区增加: ${(bufferTime * 2).toFixed(3)} 秒`);
             
             return outputPath;
             
@@ -636,21 +648,35 @@ class VideoAdDetector {
             console.error(`  ❌ 删除广告片段时出错:`, error.message);
             
             // 清理可能存在的临时文件
-            await this.cleanupTempVideos([tempPart1, tempPart2]);
+            // await this.cleanupTempVideos([tempPart1, tempPart2]);
             return null;
         }
     }
 
     async extractVideoSegment(startTime, duration, outputPath) {
         return new Promise((resolve, reject) => {
+            console.log(`    🎬 精确提取片段: 开始时间=${startTime.toFixed(3)}s, 时长=${duration.toFixed(3)}s`);
+            
             ffmpeg(this.videoPath)
+                .inputOptions(['-accurate_seek'])  // 精确寻址作为输入选项
                 .seekInput(startTime)
                 .duration(duration)
                 .outputOptions([
-                    '-c', 'copy', // 复制编码，不重新编码
+                    '-c:v', 'libx264',     // 重新编码视频以确保精确切割
+                    '-c:a', 'aac',         // 重新编码音频
+                    '-preset', 'fast',     // 快速编码预设
+                    '-crf', '23',          // 高质量编码
                     '-avoid_negative_ts', 'make_zero'
                 ])
                 .output(outputPath)
+                .on('start', (commandLine) => {
+                    console.log(`    🔧 FFmpeg命令: ${commandLine}`);
+                })
+                .on('progress', (progress) => {
+                    if (progress.percent) {
+                        console.log(`    📊 提取进度: ${progress.percent.toFixed(1)}%`);
+                    }
+                })
                 .on('end', () => {
                     console.log(`    ✅ 片段提取完成: ${outputPath}`);
                     resolve();
@@ -674,6 +700,8 @@ class VideoAdDetector {
                 }
             });
             
+            console.log(`    🔗 准备合并 ${existingPaths.length} 个视频片段`);
+            
             if (existingPaths.length === 0) {
                 reject(new Error('没有有效的视频片段可以合并'));
                 return;
@@ -689,14 +717,30 @@ class VideoAdDetector {
             
             // 创建 concat 列表文件
             const concatListPath = './concat_list.txt';
-            const concatContent = existingPaths.map(path => `file '${path}'`).join('\n');
+            const concatContent = existingPaths.map(path => `file '${path.replace(/'/g, "'\"'\"'")}'`).join('\n');
             fs.writeFileSync(concatListPath, concatContent);
+            
+            console.log(`    📝 创建合并列表文件: ${concatListPath}`);
+            console.log(`    📋 合并内容:\n${concatContent}`);
             
             ffmpeg()
                 .input(concatListPath)
                 .inputOptions(['-f', 'concat', '-safe', '0'])
-                .outputOptions(['-c', 'copy'])
+                .outputOptions([
+                    '-c:v', 'libx264',     // 重新编码确保兼容性
+                    '-c:a', 'aac',
+                    '-preset', 'fast',
+                    '-crf', '23'
+                ])
                 .output(outputPath)
+                .on('start', (commandLine) => {
+                    console.log(`    🔧 FFmpeg合并命令: ${commandLine}`);
+                })
+                .on('progress', (progress) => {
+                    if (progress.percent) {
+                        console.log(`    📊 合并进度: ${progress.percent.toFixed(1)}%`);
+                    }
+                })
                 .on('end', () => {
                     console.log(`    ✅ 视频合并完成: ${outputPath}`);
                     // 清理 concat 列表文件
