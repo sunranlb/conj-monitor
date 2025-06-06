@@ -235,6 +235,15 @@ class VideoAdDetector {
                             const adDuration = endResult.exactTime - exactResult.exactTime;
                             console.log(`\n📺 广告时长: ${adDuration.toFixed(3)} 秒`);
                             console.log(`🎯 广告范围: ${exactResult.exactTime.toFixed(3)}s - ${endResult.exactTime.toFixed(3)}s`);
+                            
+                            // 删除广告片段并输出新视频
+                            console.log(`\n🎬 开始删除广告片段并生成新视频...`);
+                            const outputVideoPath = await this.removeAdSegment(exactResult.exactTime, endResult.exactTime);
+                            
+                            if (outputVideoPath) {
+                                console.log(`\n✅ 广告删除完成！`);
+                                console.log(`📁 输出视频路径: ${outputVideoPath}`);
+                            }
                         }
                         
                         // 立即停止脚本并返回结果
@@ -578,6 +587,149 @@ class VideoAdDetector {
                 await fs.remove(tempFrameDir);
             } catch (error) {
                 // 忽略清理错误
+            }
+        }
+    }
+
+    async removeAdSegment(adStartTime, adEndTime) {
+        console.log(`  🎬 删除广告片段: ${adStartTime.toFixed(3)}s - ${adEndTime.toFixed(3)}s`);
+        
+        const outputPath = './01_no_ads.mp4';
+        const tempPart1 = './temp_part1.mp4';
+        const tempPart2 = './temp_part2.mp4';
+        
+        try {
+            // 获取视频总时长
+            const totalDuration = await this.getVideoDuration();
+            console.log(`  📹 原视频总时长: ${totalDuration.toFixed(3)} 秒`);
+            
+            // 第一部分：从开始到广告开始
+            if (adStartTime > 0) {
+                console.log(`  ⏳ 提取第一部分: 0s - ${adStartTime.toFixed(3)}s`);
+                await this.extractVideoSegment(0, adStartTime, tempPart1);
+                console.log(`  ✅ 第一部分提取完成`);
+            }
+            
+            // 第二部分：从广告结束到视频结束
+            if (adEndTime < totalDuration) {
+                console.log(`  ⏳ 提取第二部分: ${adEndTime.toFixed(3)}s - ${totalDuration.toFixed(3)}s`);
+                await this.extractVideoSegment(adEndTime, totalDuration - adEndTime, tempPart2);
+                console.log(`  ✅ 第二部分提取完成`);
+            }
+            
+            // 合并两个部分
+            console.log(`  🔗 合并视频片段...`);
+            await this.concatenateVideos([tempPart1, tempPart2], outputPath);
+            console.log(`  ✅ 视频合并完成`);
+            
+            // 清理临时文件
+            console.log(`  🧹 清理临时文件...`);
+            await this.cleanupTempVideos([tempPart1, tempPart2]);
+            
+            const finalDuration = totalDuration - (adEndTime - adStartTime);
+            console.log(`  📊 删除广告后视频时长: ${finalDuration.toFixed(3)} 秒`);
+            console.log(`  💾 节省时间: ${(adEndTime - adStartTime).toFixed(3)} 秒`);
+            
+            return outputPath;
+            
+        } catch (error) {
+            console.error(`  ❌ 删除广告片段时出错:`, error.message);
+            
+            // 清理可能存在的临时文件
+            await this.cleanupTempVideos([tempPart1, tempPart2]);
+            return null;
+        }
+    }
+
+    async extractVideoSegment(startTime, duration, outputPath) {
+        return new Promise((resolve, reject) => {
+            ffmpeg(this.videoPath)
+                .seekInput(startTime)
+                .duration(duration)
+                .outputOptions([
+                    '-c', 'copy', // 复制编码，不重新编码
+                    '-avoid_negative_ts', 'make_zero'
+                ])
+                .output(outputPath)
+                .on('end', () => {
+                    console.log(`    ✅ 片段提取完成: ${outputPath}`);
+                    resolve();
+                })
+                .on('error', (err) => {
+                    console.error(`    ❌ 片段提取失败: ${outputPath}`, err.message);
+                    reject(err);
+                })
+                .run();
+        });
+    }
+
+    async concatenateVideos(inputPaths, outputPath) {
+        return new Promise((resolve, reject) => {
+            // 过滤存在的文件
+            const existingPaths = inputPaths.filter(path => {
+                try {
+                    return fs.existsSync(path);
+                } catch {
+                    return false;
+                }
+            });
+            
+            if (existingPaths.length === 0) {
+                reject(new Error('没有有效的视频片段可以合并'));
+                return;
+            }
+            
+            if (existingPaths.length === 1) {
+                // 如果只有一个片段，直接复制
+                fs.copySync(existingPaths[0], outputPath);
+                console.log(`    ✅ 单片段复制完成: ${outputPath}`);
+                resolve();
+                return;
+            }
+            
+            // 创建 concat 列表文件
+            const concatListPath = './concat_list.txt';
+            const concatContent = existingPaths.map(path => `file '${path}'`).join('\n');
+            fs.writeFileSync(concatListPath, concatContent);
+            
+            ffmpeg()
+                .input(concatListPath)
+                .inputOptions(['-f', 'concat', '-safe', '0'])
+                .outputOptions(['-c', 'copy'])
+                .output(outputPath)
+                .on('end', () => {
+                    console.log(`    ✅ 视频合并完成: ${outputPath}`);
+                    // 清理 concat 列表文件
+                    try {
+                        fs.unlinkSync(concatListPath);
+                    } catch (error) {
+                        // 忽略清理错误
+                    }
+                    resolve();
+                })
+                .on('error', (err) => {
+                    console.error(`    ❌ 视频合并失败: ${outputPath}`, err.message);
+                    // 清理 concat 列表文件
+                    try {
+                        fs.unlinkSync(concatListPath);
+                    } catch (error) {
+                        // 忽略清理错误
+                    }
+                    reject(err);
+                })
+                .run();
+        });
+    }
+
+    async cleanupTempVideos(videoPaths) {
+        for (const videoPath of videoPaths) {
+            try {
+                if (fs.existsSync(videoPath)) {
+                    await fs.remove(videoPath);
+                    console.log(`    🗑️  已删除临时文件: ${videoPath}`);
+                }
+            } catch (error) {
+                console.warn(`    ⚠️  无法删除临时文件 ${videoPath}:`, error.message);
             }
         }
     }
