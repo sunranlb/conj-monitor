@@ -8,7 +8,7 @@ class VideoAdDetector {
         this.videoPath = './01.mp4';
         this.adFramesDir = './ad_frame';
         this.tempDir = './temp_frames';
-        this.intervalSeconds = 10;
+        this.intervalSeconds = 19;
         this.adFrames = [];
         this.similarityThreshold = 0.85; // 相似度阈值，可调整
     }
@@ -141,6 +141,18 @@ class VideoAdDetector {
                 
                 if (matchResult.isMatch) {
                     console.log(`✅ 检测到广告匹配! 相似度: ${(matchResult.similarity * 100).toFixed(2)}%, 匹配帧: ${matchResult.match.name}`);
+                    
+                    // 当检测到广告匹配时，对该时间段进行精确检测
+                    console.log(`🔍 开始精确检测广告开始时间...`);
+                    const preciseResults = await this.preciseDetection(timeInSeconds);
+                    result.preciseResults = preciseResults;
+                    
+                    // 如果找到了确切的广告开始帧，立即停止执行
+                    if (preciseResults.stopExecution) {
+                        console.log(`\n🛑 已找到广告确切开始帧，停止脚本执行`);
+                        return results;
+                    }
+                    
                 } else {
                     console.log(`❌ 未检测到广告匹配 (最高相似度: ${(matchResult.similarity * 100).toFixed(2)}%)`);
                 }
@@ -164,36 +176,255 @@ class VideoAdDetector {
         return results;
     }
 
+    async preciseDetection(matchedTime) {
+        console.log(`  🎯 开始对 ${matchedTime}秒 周围区域进行精确检测...`);
+        
+        // 检测范围：匹配时间前后各10秒
+        const rangeStart = Math.max(0, matchedTime - 10);
+        const rangeEnd = matchedTime + 10;
+        
+        console.log(`  📍 检测范围: ${rangeStart}秒 到 ${rangeEnd}秒`);
+        
+        const preciseResults = [];
+        
+        // 对每一秒进行检测
+        for (let sec = rangeStart; sec <= rangeEnd; sec++) {
+            try {
+                console.log(`    ⏱️  检测第 ${sec} 秒...`);
+                
+                const framePath = await this.extractFrameAtTime(sec);
+                const extractedFrame = await Jimp.read(framePath);
+                
+                const matchResult = await this.findMatchingAdFrame(extractedFrame);
+                
+                const result = {
+                    timeInSeconds: sec,
+                    ...matchResult
+                };
+                
+                preciseResults.push(result);
+                
+                if (matchResult.isMatch) {
+                    console.log(`    ✅ ${sec}秒: 检测到广告! 相似度: ${(matchResult.similarity * 100).toFixed(2)}%, 匹配: ${matchResult.match.name}`);
+                    
+                    // 找到第一个匹配的时间点，立即进行逐帧检测
+                    console.log(`  🎯 找到广告开始的大致时间，开始逐帧检测...`);
+                    const exactResult = await this.findExactAdStartFrame(sec - 1);
+                    
+                    // 删除临时帧文件
+                    await fs.remove(framePath);
+                    
+                    if (exactResult && exactResult.found) {
+                        console.log(`\n🎉 成功找到广告的确切开始帧！`);
+                        console.log(`📍 广告开始帧号: ${exactResult.frameNumber}`);
+                        console.log(`⏰ 广告开始时间: ${exactResult.exactTime.toFixed(3)} 秒`);
+                        console.log(`📊 匹配相似度: ${(exactResult.similarity * 100).toFixed(2)}%`);
+                        console.log(`🖼️  匹配的广告帧: ${exactResult.matchedAdFrame}`);
+                        
+                        // 立即停止脚本并返回结果
+                        return {
+                            rangeStart,
+                            rangeEnd,
+                            results: preciseResults,
+                            adStartTime: sec,
+                            exactFrameResult: exactResult,
+                            stopExecution: true // 标记需要停止执行
+                        };
+                    }
+                } else {
+                    console.log(`    ❌ ${sec}秒: 未检测到广告 (相似度: ${(matchResult.similarity * 100).toFixed(2)}%)`);
+                }
+                
+                // 删除临时帧文件
+                await fs.remove(framePath);
+                
+            } catch (error) {
+                console.warn(`    ⚠️  检测第 ${sec} 秒时出错:`, error.message);
+                preciseResults.push({
+                    timeInSeconds: sec,
+                    error: error.message,
+                    isMatch: false
+                });
+            }
+        }
+        
+        // 如果在整个范围内都没有找到匹配，分析结果
+        const adStartTime = this.analyzeAdStartTime(preciseResults);
+        if (adStartTime !== null) {
+            console.log(`  🎯 推测广告开始时间: ${adStartTime} 秒`);
+        }
+        
+        return {
+            rangeStart,
+            rangeEnd,
+            results: preciseResults,
+            adStartTime
+        };
+    }
+
+    analyzeAdStartTime(preciseResults) {
+        // 找到第一个匹配的时间点
+        const firstMatch = preciseResults.find(result => result.isMatch);
+        
+        if (!firstMatch) {
+            console.log(`  ❌ 在精确检测中未找到广告匹配`);
+            return null;
+        }
+        
+        return firstMatch.timeInSeconds;
+    }
+
+    async extractAllFramesInSecond(timeInSeconds) {
+        console.log(`    🎞️  提取第 ${timeInSeconds} 秒内的所有帧...`);
+        
+        const frames = [];
+        const tempFrameDir = path.join(this.tempDir, `second_${timeInSeconds}`);
+        await fs.ensureDir(tempFrameDir);
+        
+        return new Promise((resolve, reject) => {
+            ffmpeg(this.videoPath)
+                .seekInput(timeInSeconds)
+                .duration(1) // 只处理1秒
+                .outputOptions([
+                    '-vf', 'fps=30', // 提取30帧每秒
+                    '-q:v', '2' // 高质量
+                ])
+                .output(path.join(tempFrameDir, 'frame_%04d.jpg'))
+                .on('end', async () => {
+                    try {
+                        const files = await fs.readdir(tempFrameDir);
+                        const frameFiles = files.filter(f => f.startsWith('frame_')).sort();
+                        
+                        for (const file of frameFiles) {
+                            const framePath = path.join(tempFrameDir, file);
+                            const frameNumber = parseInt(file.match(/frame_(\d+)\.jpg/)[1]);
+                            const frameTime = timeInSeconds + (frameNumber - 1) / 30; // 假设30fps
+                            
+                            try {
+                                const image = await Jimp.read(framePath);
+                                frames.push({
+                                    frameNumber,
+                                    frameTime,
+                                    imagePath: framePath,
+                                    image
+                                });
+                            } catch (error) {
+                                console.warn(`      ⚠️  无法读取帧 ${file}:`, error.message);
+                            }
+                        }
+                        
+                        console.log(`    ✅ 成功提取 ${frames.length} 帧`);
+                        resolve(frames);
+                    } catch (error) {
+                        reject(error);
+                    }
+                })
+                .on('error', reject)
+                .run();
+        });
+    }
+
+    async findExactAdStartFrame(timeInSeconds) {
+        console.log(`  🔍 在第 ${timeInSeconds} 秒内寻找广告的确切开始帧...`);
+        
+        // 获取广告的第一帧作为参考
+        if (this.adFrames.length === 0) {
+            console.log(`  ❌ 没有广告帧可供比较`);
+            return null;
+        }
+        
+        // 假设广告帧是按顺序排列的，取第一个作为广告开始帧
+        const firstAdFrame = this.adFrames[0];
+        console.log(`  📋 使用广告参考帧: ${firstAdFrame.name}`);
+        
+        try {
+            // 提取该秒内的所有帧
+            const frames = await this.extractAllFramesInSecond(timeInSeconds);
+            
+            let bestMatch = null;
+            let bestSimilarity = 0;
+            
+            console.log(`  🔍 开始逐帧比较...`);
+            
+            for (const frame of frames) {
+                const similarity = await this.compareImages(frame.image, firstAdFrame.image);
+                
+                console.log(`    帧 ${frame.frameNumber} (时间: ${frame.frameTime.toFixed(3)}s): 相似度 ${(similarity * 100).toFixed(2)}%`);
+                
+                if (similarity > bestSimilarity) {
+                    bestSimilarity = similarity;
+                    bestMatch = frame;
+                }
+                
+                // 如果相似度达到阈值，说明找到了广告开始帧
+                if (similarity >= this.similarityThreshold) {
+                    console.log(`  🎯 找到广告开始帧!`);
+                    console.log(`  📍 帧号: ${frame.frameNumber}`);
+                    console.log(`  ⏰ 精确时间: ${frame.frameTime.toFixed(3)} 秒`);
+                    console.log(`  📊 相似度: ${(similarity * 100).toFixed(2)}%`);
+                    console.log(`  🖼️  匹配的广告帧: ${firstAdFrame.name}`);
+                    
+                    // 清理临时文件
+                    // await this.cleanupFrames(frames);
+                    
+                    return {
+                        found: true,
+                        frameNumber: frame.frameNumber,
+                        exactTime: frame.frameTime,
+                        similarity: similarity,
+                        matchedAdFrame: firstAdFrame.name
+                    };
+                }
+            }
+            
+            // 如果没有找到满足阈值的帧，返回最佳匹配
+            console.log(`  ⚠️  未找到满足阈值的帧，最佳匹配:`);
+            if (bestMatch) {
+                console.log(`  📍 帧号: ${bestMatch.frameNumber}`);
+                console.log(`  ⏰ 精确时间: ${bestMatch.frameTime.toFixed(3)} 秒`);
+                console.log(`  📊 相似度: ${(bestSimilarity * 100).toFixed(2)}%`);
+            }
+            
+            // 清理临时文件
+            // await this.cleanupFrames(frames);
+            
+            return {
+                found: false,
+                bestMatch: bestMatch,
+                bestSimilarity: bestSimilarity
+            };
+            
+        } catch (error) {
+            console.error(`  ❌ 提取帧时出错:`, error.message);
+            return null;
+        }
+    }
+
+    async cleanupFrames(frames) {
+        for (const frame of frames) {
+            try {
+                await fs.remove(frame.imagePath);
+            } catch (error) {
+                // 忽略清理错误
+            }
+        }
+        
+        // 清理临时目录
+        const tempFrameDir = path.dirname(frames[0]?.imagePath);
+        if (tempFrameDir) {
+            try {
+                await fs.remove(tempFrameDir);
+            } catch (error) {
+                // 忽略清理错误
+            }
+        }
+    }
+
     async cleanup() {
         console.log('🧹 清理临时文件...');
         await fs.remove(this.tempDir);
     }
 
-    printSummary(results) {
-        console.log('\n' + '='.repeat(60));
-        console.log('📊 检测结果汇总');
-        console.log('='.repeat(60));
-        
-        const totalFrames = results.length;
-        const matchedFrames = results.filter(r => r.isMatch).length;
-        const errorFrames = results.filter(r => r.error).length;
-        
-        console.log(`总帧数: ${totalFrames}`);
-        console.log(`匹配帧数: ${matchedFrames}`);
-        console.log(`错误帧数: ${errorFrames}`);
-        console.log(`匹配率: ${((matchedFrames / totalFrames) * 100).toFixed(2)}%`);
-        
-        if (matchedFrames > 0) {
-            console.log('\n🎯 检测到的广告时间点:');
-            results.filter(r => r.isMatch).forEach(result => {
-                const minutes = Math.floor(result.timeInSeconds / 60);
-                const seconds = result.timeInSeconds % 60;
-                console.log(`  - ${minutes}:${seconds.toString().padStart(2, '0')} (相似度: ${(result.similarity * 100).toFixed(2)}%, 匹配: ${result.match.name})`);
-            });
-        }
-        
-        console.log('='.repeat(60));
-    }
 
     async run() {
         const startTime = Date.now();
@@ -202,8 +433,6 @@ class VideoAdDetector {
             await this.init();
             const results = await this.processVideo();
             await this.cleanup();
-            
-            this.printSummary(results);
             
             const endTime = Date.now();
             const totalTime = (endTime - startTime) / 1000;
