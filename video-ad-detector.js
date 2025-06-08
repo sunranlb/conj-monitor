@@ -4,8 +4,8 @@ const fs = require('fs-extra');
 const path = require('path');
 
 class VideoAdDetector {
-    constructor() {
-        this.videoPath = './01.mp4';
+    constructor(videoPath = './01.mp4') {
+        this.videoPath = videoPath;
         this.adFramesDir = './ad_frame';
         this.tempDir = './temp_frames';
         this.intervalSeconds = 19;
@@ -158,7 +158,7 @@ class VideoAdDetector {
                 }
                 
                 // 删除临时帧文件
-                // await fs.remove(framePath);
+                await fs.remove(framePath);
                 
             } catch (error) {
                 console.error(`❌ 处理第 ${i + 1} 帧时出错:`, error.message);
@@ -212,7 +212,7 @@ class VideoAdDetector {
                     const exactResult = await this.findExactAdStartFrame(sec - 1);
                     
                     // 删除临时帧文件
-                    // await fs.remove(framePath);
+                    await fs.remove(framePath);
                     
                     if (exactResult && exactResult.found) {
                         console.log(`\n🎉 成功找到广告的确切开始帧！`);
@@ -262,7 +262,7 @@ class VideoAdDetector {
                 }
                 
                 // 删除临时帧文件
-                // await fs.remove(framePath);
+                await fs.remove(framePath);
                 
             } catch (error) {
                 console.warn(`    ⚠️  检测第 ${sec} 秒时出错:`, error.message);
@@ -391,7 +391,7 @@ class VideoAdDetector {
                     console.log(`  🖼️  匹配的广告帧: ${firstAdFrame.name}`);
                     
                     // 清理临时文件
-                    // await this.cleanupFrames(frames);
+                    await this.cleanupFrames(frames);
                     
                     return {
                         found: true,
@@ -412,7 +412,7 @@ class VideoAdDetector {
             }
             
             // 清理临时文件
-            // await this.cleanupFrames(frames);
+            await this.cleanupFrames(frames);
             
             return {
                 found: false,
@@ -601,9 +601,11 @@ class VideoAdDetector {
         
         console.log(`  📏 调整后的删除范围: ${adjustedStartTime.toFixed(3)}s - ${adjustedEndTime.toFixed(3)}s (增加了${bufferTime}秒缓冲)`);
         
-        const outputPath = './01_no_ads.mp4';
-        const tempPart1 = './temp_part1.mp4';
-        const tempPart2 = './temp_part2.mp4';
+        // 根据输入视频路径生成输出路径，输出到项目根目录
+        const inputBaseName = path.basename(this.videoPath, '.mp4');
+        const outputPath = `${inputBaseName}_no_ads.mp4`; // 输出到当前工作目录（项目根目录）
+        const tempPart1 = `./temp_part1_${inputBaseName}.mp4`;
+        const tempPart2 = `./temp_part2_${inputBaseName}.mp4`;
         
         try {
             // 获取视频总时长
@@ -634,7 +636,7 @@ class VideoAdDetector {
             
             // 清理临时文件
             // console.log(`  🧹 清理临时文件...`);
-            // await this.cleanupTempVideos([tempPart1, tempPart2]);
+            await this.cleanupTempVideos([tempPart1, tempPart2]);
             
             const finalDuration = totalDuration - (finalEndTime - adjustedStartTime);
             console.log(`  📊 删除广告后视频时长: ${finalDuration.toFixed(3)} 秒`);
@@ -648,7 +650,7 @@ class VideoAdDetector {
             console.error(`  ❌ 删除广告片段时出错:`, error.message);
             
             // 清理可能存在的临时文件
-            // await this.cleanupTempVideos([tempPart1, tempPart2]);
+            await this.cleanupTempVideos([tempPart1, tempPart2]);
             return null;
         }
     }
@@ -790,7 +792,7 @@ class VideoAdDetector {
         try {
             await this.init();
             const results = await this.processVideo();
-            // await this.cleanup();
+            await this.cleanup();
             
             const endTime = Date.now();
             const totalTime = (endTime - startTime) / 1000;
@@ -802,48 +804,141 @@ class VideoAdDetector {
             await this.cleanup();
         }
     }
-}
 
-// 检查FFmpeg是否安装
-function checkFFmpegInstallation() {
-    return new Promise((resolve) => {
-        ffmpeg.getAvailableFormats((err) => {
-            if (err) {
-                console.error('❌ FFmpeg 未安装或未在PATH中找到!');
-                console.error('请安装FFmpeg: https://ffmpeg.org/download.html');
-                console.error('macOS用户可以使用: brew install ffmpeg');
-                resolve(false);
-            } else {
-                resolve(true);
+    // 批量处理多个视频文件
+    static async processAllVideos(videoFolderPath) {
+        console.log(`\n🎬 开始批量处理视频文件夹: ${videoFolderPath}`);
+        
+        try {
+            // 检查文件夹是否存在
+            const folderExists = await fs.pathExists(videoFolderPath);
+            if (!folderExists) {
+                console.error(`❌ 文件夹不存在: ${videoFolderPath}`);
+                return;
             }
-        });
-    });
+            
+            // 读取文件夹中的所有文件
+            const files = await fs.readdir(videoFolderPath);
+            const mp4Files = files.filter(file => file.toLowerCase().endsWith('.mp4'));
+            
+            if (mp4Files.length === 0) {
+                console.log(`❌ 在文件夹 ${videoFolderPath} 中未找到任何 MP4 文件`);
+                return;
+            }
+            
+            console.log(`📁 找到 ${mp4Files.length} 个 MP4 文件:`);
+            mp4Files.forEach((file, index) => {
+                console.log(`   ${index + 1}. ${file}`);
+            });
+            
+            const totalFiles = mp4Files.length;
+            const processedResults = [];
+            
+            // 逐个处理每个视频文件
+            for (let i = 0; i < mp4Files.length; i++) {
+                const fileName = mp4Files[i];
+                const videoPath = path.join(videoFolderPath, fileName);
+                
+                console.log(`\n${'='.repeat(60)}`);
+                console.log(`🎯 正在处理第 ${i + 1}/${totalFiles} 个视频: ${fileName}`);
+                console.log(`${'='.repeat(60)}`);
+                
+                try {
+                    // 为每个视频创建新的检测器实例
+                    const detector = new VideoAdDetector(videoPath);
+                    
+                    // 初始化检测器
+                    await detector.init();
+                    
+                    // 处理视频
+                    const results = await detector.processVideo();
+                    
+                    processedResults.push({
+                        fileName,
+                        videoPath,
+                        success: true,
+                        results
+                    });
+                    
+                    console.log(`✅ 视频 ${fileName} 处理完成\n`);
+                    
+                } catch (error) {
+                    console.error(`❌ 处理视频 ${fileName} 时出错:`, error.message);
+                    processedResults.push({
+                        fileName,
+                        videoPath,
+                        success: false,
+                        error: error.message
+                    });
+                }
+            }
+            
+            // 输出总结报告
+            console.log(`\n${'='.repeat(80)}`);
+            console.log(`📊 批量处理完成! 总结报告:`);
+            console.log(`${'='.repeat(80)}`);
+            
+            const successCount = processedResults.filter(r => r.success).length;
+            const failCount = processedResults.filter(r => !r.success).length;
+            
+            console.log(`📈 总共处理: ${totalFiles} 个视频文件`);
+            console.log(`✅ 成功处理: ${successCount} 个`);
+            console.log(`❌ 处理失败: ${failCount} 个`);
+            
+            if (successCount > 0) {
+                console.log(`\n✅ 成功处理的文件:`);
+                processedResults
+                    .filter(r => r.success)
+                    .forEach((result, index) => {
+                        console.log(`   ${index + 1}. ${result.fileName}`);
+                    });
+            }
+            
+            if (failCount > 0) {
+                console.log(`\n❌ 处理失败的文件:`);
+                processedResults
+                    .filter(r => !r.success)
+                    .forEach((result, index) => {
+                        console.log(`   ${index + 1}. ${result.fileName} - 错误: ${result.error}`);
+                    });
+            }
+            
+            console.log(`\n🎉 批量处理全部完成!`);
+            
+        } catch (error) {
+            console.error(`❌ 批量处理过程中出现错误:`, error.message);
+        }
+    }
 }
 
 // 主函数
 async function main() {
     console.log('🎥 视频广告检测器启动中...\n');
     
-    // 检查FFmpeg
-    const hasFFmpeg = await checkFFmpegInstallation();
-    if (!hasFFmpeg) {
-        process.exit(1);
-    }
-    
-    // 检查文件是否存在
-    if (!await fs.pathExists('./01.mp4')) {
-        console.error('❌ 视频文件 01.mp4 不存在!');
-        process.exit(1);
-    }
-    
+    // 检查广告帧目录是否存在
     if (!await fs.pathExists('./ad_frame')) {
         console.error('❌ 广告帧目录 ad_frame 不存在!');
         process.exit(1);
     }
     
-    // 运行检测器
-    const detector = new VideoAdDetector();
-    await detector.run();
+    // 检查是否要处理 original_mp4 文件夹
+    const originalMp4Path = './original_mp4';
+    const singleVideoPath = './01.mp4';
+    
+    if (await fs.pathExists(originalMp4Path)) {
+        console.log('📁 检测到 original_mp4 文件夹，开始批量处理...\n');
+        await VideoAdDetector.processAllVideos(originalMp4Path);
+    } else if (await fs.pathExists(singleVideoPath)) {
+        console.log('📹 未找到 original_mp4 文件夹，处理单个视频文件 01.mp4...\n');
+        const detector = new VideoAdDetector(singleVideoPath);
+        await detector.run();
+    } else {
+        console.error('❌ 既没有找到 original_mp4 文件夹，也没有找到 01.mp4 文件!');
+        console.log('💡 请确保以下文件之一存在:');
+        console.log('   - ./original_mp4/ (文件夹，包含要批量处理的 MP4 文件)');
+        console.log('   - ./01.mp4 (单个视频文件)');
+        process.exit(1);
+    }
 }
 
 // 启动程序
