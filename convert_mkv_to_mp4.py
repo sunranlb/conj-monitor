@@ -24,12 +24,14 @@ def convert_mkv_to_mp4(mkv_path, mp4_path, burn_subtitles=False):
     try:
         if burn_subtitles:
             # Burn subtitles into video with larger font
+            # Escape special characters in filename for subtitle filter
+            escaped_path = mkv_path.replace('\\', '\\\\').replace(':', '\\:').replace('[', '\\[').replace(']', '\\]').replace('(', '\\(').replace(')', '\\)')
             cmd = [
                 'ffmpeg',
                 '-i', mkv_path,
                 '-c:v', 'libx264',     # Re-encode video to burn subtitles
                 '-c:a', 'copy',        # Copy audio without re-encoding
-                '-vf', 'subtitles=filename=' + mkv_path.replace(':', '\\:') + ':si=0:force_style=\'FontSize=28,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2\'',  # Burn first subtitle with larger font
+                '-vf', f'subtitles=filename={escaped_path}:si=0:force_style=\'FontSize=28,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2\'',  # Burn first subtitle with larger font
                 '-movflags', '+faststart',
                 mp4_path,
                 '-y'  # Overwrite output file if it exists
